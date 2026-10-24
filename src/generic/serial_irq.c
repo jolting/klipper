@@ -15,12 +15,23 @@
 #include "serial_irq.h" // serial_enable_tx_irq
 
 #define RX_BUFFER_SIZE 192
+#if CONFIG_SERIAL_RS485_TDMA
+#define TX_BUFFER_SIZE 240
+#else
+#define TX_BUFFER_SIZE 96
+#endif
 
 static uint8_t receive_buf[RX_BUFFER_SIZE], receive_pos;
-static uint8_t transmit_buf[96], transmit_pos, transmit_max;
+static uint8_t transmit_buf[TX_BUFFER_SIZE], transmit_pos, transmit_max;
+#if CONFIG_SERIAL_RS485_TDMA
+static uint8_t transmit_commit;
+DECL_CONSTANT("SERIAL_RS485_TDMA", 1);
+DECL_CONSTANT("RECEIVE_WINDOW", 1);
+#else
+DECL_CONSTANT("RECEIVE_WINDOW", RX_BUFFER_SIZE);
+#endif
 
 DECL_CONSTANT("SERIAL_BAUD", CONFIG_SERIAL_BAUD);
-DECL_CONSTANT("RECEIVE_WINDOW", RX_BUFFER_SIZE);
 
 // Rx interrupt - store read data
 void
@@ -38,8 +49,13 @@ serial_rx_byte(uint_fast8_t data)
 int
 serial_get_tx_byte(uint8_t *pdata)
 {
+#if CONFIG_SERIAL_RS485_TDMA
+    if (transmit_pos >= transmit_commit)
+        return -1;
+#else
     if (transmit_pos >= transmit_max)
         return -1;
+#endif
     *pdata = transmit_buf[transmit_pos++];
     return 0;
 }
@@ -85,6 +101,13 @@ console_task(void)
         console_pop_input(pop_count);
         if (ret > 0)
             command_send_ack();
+#if CONFIG_SERIAL_RS485_TDMA
+        if (ret > 0 || !readb(&receive_pos)) {
+            writeb(&transmit_commit, readb(&transmit_max));
+            if (readb(&transmit_pos) < readb(&transmit_commit))
+                serial_enable_tx_irq();
+        }
+#endif
     }
 }
 DECL_TASK(console_task);
@@ -98,30 +121,53 @@ console_sendf(const struct command_encoder *ce, va_list args)
     if (tpos >= tmax) {
         tpos = tmax = 0;
         writeb(&transmit_max, 0);
+#if CONFIG_SERIAL_RS485_TDMA
+        writeb(&transmit_commit, 0);
+#endif
         writeb(&transmit_pos, 0);
     }
-    if (tmax + READP(ce->max_size) > sizeof(transmit_buf)) {
-        if (tmax - tpos + READP(ce->min_size) > sizeof(transmit_buf))
+    uint_fast8_t max_size = READP(ce->max_size);
+    uint_fast8_t limit = sizeof(transmit_buf);
+#if CONFIG_SERIAL_RS485_TDMA
+    if (max_size > MESSAGE_MIN)
+        limit -= MESSAGE_MIN;
+#endif
+    if (tmax + max_size > limit) {
+        if (tmax - tpos + READP(ce->min_size) > limit)
             // Not enough space for message
             return;
         // Disable TX irq and move buffer
         writeb(&transmit_max, 0);
+#if CONFIG_SERIAL_RS485_TDMA
+        uint_fast8_t tcommit = readb(&transmit_commit);
+        writeb(&transmit_commit, 0);
+#endif
         tpos = readb(&transmit_pos);
         tmax -= tpos;
         memmove(&transmit_buf[0], &transmit_buf[tpos], tmax);
         writeb(&transmit_pos, 0);
+#if CONFIG_SERIAL_RS485_TDMA
+        tcommit = tcommit > tpos ? tcommit - tpos : 0;
+        writeb(&transmit_commit, tcommit);
+        writeb(&transmit_max, tmax);
+        if (tcommit)
+            serial_enable_tx_irq();
+#else
         writeb(&transmit_max, tmax);
         serial_enable_tx_irq();
+#endif
     }
 
     // Generate message
     uint8_t *buf = &transmit_buf[tmax];
     uint_fast8_t msglen = command_encode_and_frame(
-        buf, sizeof(transmit_buf) - tmax, ce, args);
+        buf, limit - tmax, ce, args);
     if (!msglen)
         return;
 
     // Start message transmit
     writeb(&transmit_max, tmax + msglen);
+#if !CONFIG_SERIAL_RS485_TDMA
     serial_enable_tx_irq();
+#endif
 }
