@@ -27,6 +27,9 @@ lookup_clock_line(uint32_t periph_base)
         uint32_t bit = 1 << ((periph_base - AHBPERIPH_BASE) / 0x400);
         return (struct cline){.en=&RCC->AHBENR, .bit=bit};
     } else if (periph_base >= APB2PERIPH_BASE) {
+        if (CONFIG_MACH_N32G45x && periph_base == 0x40015400)
+            return (struct cline){.en=&RCC->APB2ENR, .rst=&RCC->APB2RSTR
+                                  , .bit=(1 << 18)};
         uint32_t bit = 1 << ((periph_base - APB2PERIPH_BASE) / 0x400);
         return (struct cline){.en=&RCC->APB2ENR, .rst=&RCC->APB2RSTR, .bit=bit};
     } else {
@@ -39,6 +42,15 @@ lookup_clock_line(uint32_t periph_base)
 uint32_t
 get_pclock_frequency(uint32_t periph_base)
 {
+    if (CONFIG_MACH_N32G45x) {
+        if (periph_base < APB2PERIPH_BASE)
+            return (CONFIG_CLOCK_FREQ > 72000000
+                    ? CONFIG_CLOCK_FREQ / 4
+                    : CONFIG_CLOCK_FREQ / 2);
+        return (CONFIG_CLOCK_FREQ > 72000000
+                ? CONFIG_CLOCK_FREQ / 2
+                : CONFIG_CLOCK_FREQ);
+    }
     return FREQ_PERIPH;
 }
 
@@ -59,6 +71,58 @@ clock_setup(void)
 {
     // Configure and enable PLL
     uint32_t cfgr;
+    if (CONFIG_MACH_N32G45x) {
+        uint32_t hse_div = 0, mult;
+        if (!CONFIG_STM32_CLOCK_REF_INTERNAL) {
+            RCC->CR |= RCC_CR_HSEON;
+            int timeout = 100000;
+            while (!(RCC->CR & RCC_CR_HSERDY) && --timeout)
+                ;
+            if (CONFIG_CLOCK_FREQ % CONFIG_CLOCK_REF_FREQ == 0
+                && (CONFIG_CLOCK_FREQ / CONFIG_CLOCK_REF_FREQ) <= 32) {
+                mult = CONFIG_CLOCK_FREQ / CONFIG_CLOCK_REF_FREQ;
+            } else {
+                hse_div = RCC_CFGR_PLLXTPRE_HSE_DIV2;
+                mult = CONFIG_CLOCK_FREQ / (CONFIG_CLOCK_REF_FREQ / 2);
+            }
+            cfgr = (1 << RCC_CFGR_PLLSRC_Pos) | hse_div;
+        } else {
+            mult = CONFIG_CLOCK_FREQ / 4000000;
+            cfgr = 0;
+        }
+
+        uint32_t pll_mul;
+        if (mult <= 16)
+            pll_mul = (mult - 2) << RCC_CFGR_PLLMULL_Pos;
+        else
+            pll_mul = (1 << 27) | ((mult - 17) << RCC_CFGR_PLLMULL_Pos);
+
+        uint32_t ppre1 = (CONFIG_CLOCK_FREQ > 72000000
+                          ? 0x5 << RCC_CFGR_PPRE1_Pos // DIV4
+                          : RCC_CFGR_PPRE1_DIV2);
+        uint32_t ppre2 = (CONFIG_CLOCK_FREQ > 72000000
+                          ? RCC_CFGR_PPRE2_DIV2
+                          : RCC_CFGR_PPRE2_DIV1);
+
+        cfgr |= pll_mul | ppre1 | ppre2 | RCC_CFGR_ADCPRE_DIV8;
+        RCC->CFGR = cfgr;
+        RCC->CR |= RCC_CR_PLLON;
+
+        uint32_t latency = (CONFIG_CLOCK_FREQ <= 36000000 ? 0 :
+                            CONFIG_CLOCK_FREQ <= 72000000 ? 2 :
+                            CONFIG_CLOCK_FREQ <= 108000000 ? 3 : 4);
+        FLASH->ACR = (latency << FLASH_ACR_LATENCY_Pos) | FLASH_ACR_PRFTBE;
+
+        // Wait for PLL lock
+        while (!(RCC->CR & RCC_CR_PLLRDY))
+            ;
+
+        // Switch system clock to PLL
+        RCC->CFGR = cfgr | RCC_CFGR_SW_PLL;
+        while ((RCC->CFGR & RCC_CFGR_SWS_Msk) != RCC_CFGR_SWS_PLL)
+            ;
+        return;
+    }
     if (!CONFIG_STM32_CLOCK_REF_INTERNAL) {
         // Configure 72Mhz PLL from external crystal (HSE)
         RCC->CR |= RCC_CR_HSEON;
@@ -259,7 +323,7 @@ bootloader_request(void)
         usb_hid_bootloader();
     else if (CONFIG_STM32_FLASH_START_2000)
         usb_stm32duino_bootloader();
-    else if (CONFIG_MACH_N32G455 && CONFIG_STM32_FLASH_START_10000)
+    else if (CONFIG_MACH_N32G45x && CONFIG_STM32_FLASH_START_10000)
         flashforge_bootloader_request();
 }
 
