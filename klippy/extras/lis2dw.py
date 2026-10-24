@@ -74,9 +74,14 @@ class LIS2DW:
         self.mcu = mcu = self.bus.get_mcu()
         self.oid = oid = mcu.create_oid()
         self.query_lis2dw_cmd = None
-        mcu.add_config_cmd("config_lis2dw oid=%d bus_oid=%d bus_oid_type=%s "
-                           "lis_chip_type=%s" % (oid, self.bus.get_oid(),
-                            self.bus_type, self.lis_type))
+        msgformat = mcu._serial.msgparser.messages_by_name.get('config_lis2dw')
+        if msgformat and 'bus_oid_type' in msgformat.name_to_type:
+            mcu.add_config_cmd("config_lis2dw oid=%d bus_oid=%d bus_oid_type=%s "
+                               "lis_chip_type=%s" % (oid, self.bus.get_oid(),
+                                self.bus_type, self.lis_type))
+        else:
+            mcu.add_config_cmd("config_lis2dw oid=%d spi_oid=%d"
+                               % (oid, self.bus.get_oid()))
         mcu.add_config_cmd("query_lis2dw oid=%d rest_ticks=0"
                            % (oid,), on_restart=True)
         mcu.register_config_callback(self._build_config)

@@ -464,6 +464,9 @@ choice
     config STM32_SERIAL_USART6_ALT_PC7_PC6
         bool "Serial (on USART6 PC7/PC6)" if LOW_LEVEL_OPTIONS && MACH_STM32F401
         select SERIAL
+    config STM32_SERIAL_UART6_PC5_PC4
+        bool "Serial (on UART6 PC5/PC4)" if LOW_LEVEL_OPTIONS && MACH_N32G45x
+        select SERIAL
     config STM32_CANBUS_PA11_PA12
         bool "CAN bus (on PA11/PA12)"
         depends on HAVE_STM32_CANBUS || HAVE_STM32_FDCANBUS
@@ -545,6 +548,25 @@ choice
     config STM32_CMENU_CANBUS_PH13_PH14
         bool "CAN bus (on PH13/PH14)" if MACH_STM32H743
         depends on HAVE_STM32_FDCANBUS
+endchoice
+
+config STM32_SERIAL_RS485_DE
+    bool "Enable RS485 Transmit Enable (DE) pin"
+    depends on SERIAL
+    select SERIAL_RS485_TDD
+    default n
+    help
+        Enable an RS485 Driver Enable (DE) pin. During transmit, the
+        DE pin is driven HIGH to enable the RS485 transmitter, and
+        returned LOW on transmission complete (TC) for receive mode.
+
+choice
+    prompt "RS485 DE pin"
+    depends on STM32_SERIAL_RS485_DE
+    default STM32_SERIAL_RS485_DE_PA11
+
+    config STM32_SERIAL_RS485_DE_PA11
+        bool "PA11"
 endchoice
 
 

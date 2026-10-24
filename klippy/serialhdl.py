@@ -12,10 +12,12 @@ class error(Exception):
     pass
 
 class SerialReader:
-    def __init__(self, reactor, mcu_name=""):
+    def __init__(self, reactor, mcu_name="", warn_prefix="", **kwargs):
         self.reactor = reactor
         self.warn_prefix = ""
         self.mcu_name = mcu_name
+        if warn_prefix:
+            self.warn_prefix = warn_prefix
         if self.mcu_name:
             self.warn_prefix = "mcu '%s': " % (self.mcu_name)
         sq_name = ("serialq %s" % (self.mcu_name))[:15]
@@ -38,15 +40,33 @@ class SerialReader:
         # Sent message notification tracking
         self.last_notify_id = 0
         self.pending_notifications = {}
+        self.tdd_timer = None
+        self.tdd_nop_cmd = None
+        self.last_tx_time = 0.
+        self.last_rx_time = 0.
+    def _tdd_poll_event(self, eventtime):
+        if self.serialqueue is None:
+            return self.reactor.NEVER
+        if (eventtime - self.last_rx_time >= 0.020
+            and eventtime - self.last_tx_time >= 0.020):
+            self.last_tx_time = eventtime
+            self.ffi_lib.serialqueue_send(
+                self.serialqueue, self.default_cmd_queue,
+                self.tdd_nop_cmd, len(self.tdd_nop_cmd), 0, 0, 0)
+        return eventtime + 0.020
     def _bg_thread(self):
         name_short = ("serialhdl %s" % (self.mcu_name))[:15]
-        self.ffi_lib.set_thread_name(name_short.encode('utf-8'))
+        try:
+            self.ffi_lib.set_thread_name(name_short.encode('utf-8'))
+        except (AttributeError, TypeError):
+            pass
         response = self.ffi_main.new('struct pull_queue_message *')
         while 1:
             self.ffi_lib.serialqueue_pull(self.serialqueue, response)
             count = response.len
             if count < 0:
                 break
+            self.last_rx_time = response.receive_time
             if response.notify_id:
                 params = {'#sent_time': response.sent_time,
                           '#receive_time': response.receive_time}
@@ -85,11 +105,13 @@ class SerialReader:
                 identify_data += msgdata
     def _start_session(self, serial_dev, serial_fd_type=b'u', client_id=0):
         self.serial_dev = serial_dev
-        self.serialqueue = self.ffi_main.gc(
-            self.ffi_lib.serialqueue_alloc(serial_dev.fileno(),
-                                           serial_fd_type, client_id,
-                                           self.sq_name),
-            self.ffi_lib.serialqueue_free)
+        try:
+            sq = self.ffi_lib.serialqueue_alloc(
+                serial_dev.fileno(), serial_fd_type, client_id, self.sq_name)
+        except TypeError:
+            sq = self.ffi_lib.serialqueue_alloc(
+                serial_dev.fileno(), serial_fd_type, client_id)
+        self.serialqueue = self.ffi_main.gc(sq, self.ffi_lib.serialqueue_free)
         self.background_thread = threading.Thread(target=self._bg_thread)
         self.background_thread.start()
         # Obtain and load the data dictionary from the firmware
@@ -115,6 +137,10 @@ class SerialReader:
         if receive_window is not None:
             self.ffi_lib.serialqueue_set_receive_window(
                 self.serialqueue, receive_window)
+        if msgparser.get_constant_int('SERIAL_RS485_TDD', 0):
+            self.tdd_nop_cmd = msgparser.create_command('debug_nop')
+            self.tdd_timer = self.reactor.register_timer(
+                self._tdd_poll_event, self.reactor.NOW)
         return True
     def connect_canbus(self, canbus_uuid, canbus_nodeid, canbus_iface="can0"):
         import can # XXX
@@ -193,28 +219,43 @@ class SerialReader:
                 serial_dev = serial.Serial(baudrate=baud, timeout=0,
                                            exclusive=True)
                 serial_dev.port = serialport
-                serial_dev.rts = rts
+                if rts is not None:
+                    serial_dev.rts = rts
                 serial_dev.open()
             except (OSError, IOError, serial.SerialException) as e:
                 logging.warning("%sUnable to open serial port: %s",
                              self.warn_prefix, e)
                 self.reactor.pause(self.reactor.monotonic() + 5.)
                 continue
-            stk500v2_leave(serial_dev, self.reactor)
+            if rts is not None:
+                stk500v2_leave(serial_dev, self.reactor)
             ret = self._start_session(serial_dev)
             if ret:
                 break
     def connect_file(self, debugoutput, dictionary, pace=False):
         self.serial_dev = debugoutput
         self.msgparser.process_identify(dictionary, decompress=False)
-        self.serialqueue = self.ffi_main.gc(
-            self.ffi_lib.serialqueue_alloc(self.serial_dev.fileno(), b'f', 0,
-                                           self.sq_name),
-            self.ffi_lib.serialqueue_free)
-    def set_clock_est(self, freq, conv_time, conv_clock):
-        self.ffi_lib.serialqueue_set_clock_est(
-            self.serialqueue, freq, conv_time, conv_clock)
+        try:
+            sq = self.ffi_lib.serialqueue_alloc(
+                self.serial_dev.fileno(), b'f', 0, self.sq_name)
+        except TypeError:
+            sq = self.ffi_lib.serialqueue_alloc(
+                self.serial_dev.fileno(), b'f', 0)
+        self.serialqueue = self.ffi_main.gc(sq, self.ffi_lib.serialqueue_free)
+    def set_clock_est(self, freq, conv_time, conv_clock, last_clock=0):
+        try:
+            self.ffi_lib.serialqueue_set_clock_est(
+                self.serialqueue, freq, conv_time, conv_clock)
+        except TypeError:
+            self.ffi_lib.serialqueue_set_clock_est(
+                self.serialqueue, freq, conv_time, conv_clock, last_clock)
+        if self.tdd_timer is not None:
+            self.reactor.update_timer(self.tdd_timer,
+                                      self.reactor.monotonic() + 0.020)
     def disconnect(self):
+        if self.tdd_timer is not None:
+            self.reactor.unregister_timer(self.tdd_timer)
+            self.tdd_timer = None
         if self.serialqueue is not None:
             self.ffi_lib.serialqueue_exit(self.serialqueue)
             if self.background_thread is not None:
