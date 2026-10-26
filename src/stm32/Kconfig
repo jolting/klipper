@@ -528,6 +528,25 @@ choice
         depends on HAVE_STM32_FDCANBUS
 endchoice
 
+config STM32_SERIAL_RS485_DE
+    bool "Enable RS485 Transmit Enable (DE) pin"
+    depends on SERIAL
+    select SERIAL_RS485_TDD
+    default n
+    help
+        Enable an RS485 Driver Enable (DE) pin. During transmit, the
+        DE pin is driven HIGH to enable the RS485 transmitter, and
+        returned LOW on transmission complete (TC) for receive mode.
+
+choice
+    prompt "RS485 DE pin"
+    depends on STM32_SERIAL_RS485_DE
+    default STM32_SERIAL_RS485_DE_PA11
+
+    config STM32_SERIAL_RS485_DE_PA11
+        bool "PA11"
+endchoice
+
 
 config STM32_CANBUS_PB8_PB9
     bool

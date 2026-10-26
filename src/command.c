@@ -135,9 +135,12 @@ command_encodef(uint8_t *buf, uint_fast8_t buf_size
                 , const struct command_encoder *ce, va_list args)
 {
     uint_fast8_t max_size = READP(ce->max_size);
-    if (max_size <= MESSAGE_MIN)
+    if (max_size <= MESSAGE_MIN) {
         // Ack/Nak message
+        if (buf_size < MESSAGE_MIN)
+            return 0;
         return max_size;
+    }
     if (buf_size < max_size)
         max_size = buf_size;
     uint8_t *p = &buf[MESSAGE_HEADER_SIZE];
@@ -267,6 +270,7 @@ command_lookup_parser(uint_fast16_t cmdid)
 // Empty message (for ack/nak transmission)
 const struct command_encoder encode_acknak PROGMEM = {
     .max_size = MESSAGE_MIN,
+    .min_size = MESSAGE_MIN,
 };
 
 enum { CF_NEED_SYNC=1<<0, CF_NEED_VALID=1<<1 };
@@ -300,7 +304,8 @@ command_find_block(uint8_t *buf, uint_fast8_t buf_len, uint_fast8_t *pop_count)
     // Check sequence number
     if (msgseq != next_sequence) {
         // Lost message - discard messages until it is retransmitted
-        goto nak;
+        command_sendf(&encode_acknak);
+        return -2;
     }
     next_sequence = ((msgseq + 1) & MESSAGE_SEQ_MASK) | MESSAGE_DEST;
     return 1;
@@ -327,7 +332,6 @@ need_sync: ;
     if (sync_state & CF_NEED_VALID)
         return -1;
     sync_state |= CF_NEED_VALID;
-nak:
     command_sendf(&encode_acknak);
     return -1;
 }
